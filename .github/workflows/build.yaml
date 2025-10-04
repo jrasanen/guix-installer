@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload ISO to R2
         run: |
-          BUCKET_NAME="guix-installers"
+          BUCKET_NAME="guix-builds"
           ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
           R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
           RELEASE_TAG="${{ env.RELEASE_TAG }}"
