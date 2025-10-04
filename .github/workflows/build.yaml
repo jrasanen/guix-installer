@@ -6,10 +6,8 @@ on:
       - master
 
   schedule:
-    # build every week
     - cron: "0 0 */7 * *"
 
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -43,11 +41,11 @@ jobs:
 
       - name: Git checkout
         uses: actions/checkout@v4
-      - name: Guix cache
+        
+      - name: Guix cache restore
         uses: actions/cache/restore@v3
         with:
           path: ~/.cache/guix
-          # use a key that (almost) never matches
           key: guix-cache-${{ github.sha }}
           restore-keys: |
             guix-cache-
@@ -68,7 +66,6 @@ jobs:
 
       - name: Set up Nonguix Substitutes
         run: |
-          # This is necessary to authorize the substitute server
           wget https://substitutes.nonguix.org/signing-key.pub
           mv signing-key.pub nonguix-signing-key.pub
           sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
@@ -84,18 +81,14 @@ jobs:
     
       - name: Build ISO
         run: |
-          
-          # Write out the channels file so it can be included
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
-          
-          # Build the image
           image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
-
-          # Copy the image to the local folder with a better name
           export RELEASE_TAG=$(date +"%Y%m%d%H%M")
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
           cp $image ./guix-installer-$RELEASE_TAG.iso
-      - uses: actions/cache/save@v3
+          
+      - name: Guix cache save
+        uses: actions/cache/save@v3
         if: always()
         with:
           path: ~/.cache/guix
@@ -103,9 +96,57 @@ jobs:
 
       - name: Prepare Release Notes
         run: |
-          echo $'This installer image was prepared with the following channel configuration:\r\n\r\n```\r\n' > release-notes.md
+          echo $'Installer image prepared with the following channel configuration:\r\n\r\n```\r\n' > release-notes.md
           cat ./guix/channels.scm >> release-notes.md
           echo $'\r\n```' >> release-notes.md
+
+      - name: Configure R2 Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws-region: auto
+
+      - name: Upload ISO to R2
+        run: |
+          BUCKET_NAME="guix-installers"
+          ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
+          R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
+          
+          # Upload versioned ISO
+          aws s3 cp guix-installer-${{ env.RELEASE_TAG }}.iso \
+            s3://$BUCKET_NAME/guix-installer-${{ env.RELEASE_TAG }}.iso \
+            --endpoint-url $R2_ENDPOINT
+          
+          # Upload as "latest" for convenience
+          aws s3 cp guix-installer-${{ env.RELEASE_TAG }}.iso \
+            s3://$BUCKET_NAME/guix-installer-latest.iso \
+            --endpoint-url $R2_ENDPOINT
+          
+          R2_PUBLIC_URL="https://guix.aamu.cloud"
+          DOWNLOAD_URL="$R2_PUBLIC_URL/guix-installer-${{ env.RELEASE_TAG }}.iso"
+          DOWNLOAD_URL_LATEST="$R2_PUBLIC_URL/guix-installer-latest.iso"
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+          echo "DOWNLOAD_URL_LATEST=$DOWNLOAD_URL_LATEST" >> $GITHUB_ENV
+          
+          ISO_SIZE=$(ls -lh guix-installer-${{ env.RELEASE_TAG }}.iso | awk '{print $5}')
+          echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
+          
+          cat >> release-notes.md << EOF
+          
+## Download ISO
+
+**Direct Download (This Version):** [$DOWNLOAD_URL]($DOWNLOAD_URL)
+
+**Latest Version (Always Current):** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)
+
+**Size:** $ISO_SIZE
+
+**SHA256 Checksum:**
+\`\`\`
+$(sha256sum guix-installer-${{ env.RELEASE_TAG }}.iso | awk '{print $1}')
+\`\`\`
+EOF
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -113,8 +154,5 @@ jobs:
           name: Guix Installer - ${{ env.RELEASE_TAG }}
           tag_name: v${{ env.RELEASE_TAG }}
           body_path: release-notes.md
-          files: guix-installer-${{ env.RELEASE_TAG }}.iso
-          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: SystemCrafters/guix-installer
