@@ -14,6 +14,7 @@ env:
   AWS_EC2_METADATA_DISABLED: "true"
   AWS_REGION: auto
   AWS_DEFAULT_REGION: auto
+  BUCKET_NAME: guix-builds
 
 jobs:
   preflight:
@@ -25,22 +26,15 @@ jobs:
     steps:
       - id: vars
         run: |
-          echo "bucket=guix-installers" >> $GITHUB_OUTPUT
+          echo "bucket=${{ env.BUCKET_NAME }}" >> $GITHUB_OUTPUT
           echo "endpoint=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" >> $GITHUB_OUTPUT
       - name: Install AWS CLI
         run: |
           python3 -m pip install --upgrade --user awscli
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           aws --version
-      - name: Verify credentials & bucket access
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          aws s3 ls s3://${{ steps.vars.outputs.bucket }} --endpoint-url ${{ steps.vars.outputs.endpoint }} >/dev/null
       - id: probe
-        name: Probe upload capabilities
+        name: Probe upload capabilities without listing
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -48,19 +42,28 @@ jobs:
           set -euo pipefail
           B="${{ steps.vars.outputs.bucket }}"
           E="${{ steps.vars.outputs.endpoint }}"
-          mkdir -p _preflight && dd if=/dev/zero of=_preflight/ten_mb.bin bs=1M count=10 status=none
+          PREFIX="_preflight/$(openssl rand -hex 6)"
+          KEY_MPU="$PREFIX/ten_mb.bin"
+          KEY_SINGLE="$PREFIX/small.txt"
+
+          mkdir -p _preflight
+          dd if=/dev/zero of=_preflight/ten_mb.bin bs=1M count=10 status=none
           echo ok > _preflight/small.txt
-          if aws s3 cp _preflight/ten_mb.bin s3://$B/_preflight/ten_mb.bin --endpoint-url "$E" >/dev/null 2>&1; then
+
+          MPU_ID=$(aws s3api create-multipart-upload --bucket "$B" --key "$KEY_MPU" --endpoint-url "$E" --query UploadId --output text 2>/dev/null || true)
+          if [ -n "${MPU_ID:-}" ] && [ "$MPU_ID" != "None" ]; then
+            aws s3api abort-multipart-upload --bucket "$B" --key "$KEY_MPU" --upload-id "$MPU_ID" --endpoint-url "$E" >/dev/null 2>&1 || true
             echo "upload_mode=mpu" >> $GITHUB_OUTPUT
-            aws s3 rm s3://$B/_preflight/ten_mb.bin --endpoint-url "$E" || true
             exit 0
           fi
-          if aws s3 cp _preflight/small.txt s3://$B/_preflight/small.txt --endpoint-url "$E" >/dev/null 2>&1; then
+
+          if aws s3api put-object --bucket "$B" --key "$KEY_SINGLE" --body _preflight/small.txt --endpoint-url "$E" >/dev/null 2>&1; then
+            aws s3api delete-object --bucket "$B" --key "$KEY_SINGLE" --endpoint-url "$E" >/dev/null 2>&1 || true
             echo "upload_mode=single" >> $GITHUB_OUTPUT
-            aws s3 rm s3://$B/_preflight/small.txt --endpoint-url "$E" || true
             exit 0
           fi
-          echo "ERROR: Cannot upload to R2 (neither MPU nor single-part). Fix R2 token/bucket perms." >&2
+
+          echo "No permitted upload method: grant MPU (Create/UploadPart/Complete/Abort) or PutObject on bucket $B" >&2
           exit 1
 
   build:
