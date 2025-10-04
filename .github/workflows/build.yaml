@@ -2,28 +2,84 @@ name: Build Guix Installer
 
 on:
   push:
-    branches:
-      - master
-
+    branches: [ master ]
   schedule:
     - cron: "0 0 */7 * *"
-
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+env:
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_REGION: auto
+  AWS_DEFAULT_REGION: auto
+
 jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    outputs:
+      upload_mode: ${{ steps.probe.outputs.upload_mode }}
+      bucket: ${{ steps.vars.outputs.bucket }}
+      endpoint: ${{ steps.vars.outputs.endpoint }}
+    steps:
+      - id: vars
+        run: |
+          echo "bucket=guix-installers" >> $GITHUB_OUTPUT
+          echo "endpoint=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" >> $GITHUB_OUTPUT
+      - name: Install AWS CLI
+        run: |
+          python3 -m pip install --upgrade --user awscli
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          aws --version
+      - name: Verify credentials & bucket access
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws s3 ls s3://${{ steps.vars.outputs.bucket }} --endpoint-url ${{ steps.vars.outputs.endpoint }} >/dev/null
+      - id: probe
+        name: Probe upload capabilities
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          B="${{ steps.vars.outputs.bucket }}"
+          E="${{ steps.vars.outputs.endpoint }}"
+          mkdir -p _preflight && dd if=/dev/zero of=_preflight/ten_mb.bin bs=1M count=10 status=none
+          echo ok > _preflight/small.txt
+          if aws s3 cp _preflight/ten_mb.bin s3://$B/_preflight/ten_mb.bin --endpoint-url "$E" >/dev/null 2>&1; then
+            echo "upload_mode=mpu" >> $GITHUB_OUTPUT
+            aws s3 rm s3://$B/_preflight/ten_mb.bin --endpoint-url "$E" || true
+            exit 0
+          fi
+          if aws s3 cp _preflight/small.txt s3://$B/_preflight/small.txt --endpoint-url "$E" >/dev/null 2>&1; then
+            echo "upload_mode=single" >> $GITHUB_OUTPUT
+            aws s3 rm s3://$B/_preflight/small.txt --endpoint-url "$E" || true
+            exit 0
+          fi
+          echo "ERROR: Cannot upload to R2 (neither MPU nor single-part). Fix R2 token/bucket perms." >&2
+          exit 1
+
   build:
     runs-on: buildjet-16vcpu-ubuntu-2204
+    needs: preflight
+    env:
+      UPLOAD_MODE: ${{ needs.preflight.outputs.upload_mode }}
+      BUCKET_NAME: ${{ needs.preflight.outputs.bucket }}
+      R2_ENDPOINT: ${{ needs.preflight.outputs.endpoint }}
     steps:
       - name: Git checkout
         uses: actions/checkout@v4
-        
+
       - name: Guix cache restore
         uses: actions/cache/restore@v3
         with:
           path: ~/.cache/guix
           key: guix-cache-${{ github.sha }}
-          restore-keys: |
-            guix-cache-
+          restore-keys: guix-cache-
 
       - name: Install Guix
         uses: PromyLOPh/guix-install-action@v1.6
@@ -38,28 +94,30 @@ jobs:
                          (openpgp-fingerprint
                            "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
                     %default-channels)
+
       - name: Set up Nonguix Substitutes
         run: |
-          wget https://substitutes.nonguix.org/signing-key.pub
-          mv signing-key.pub nonguix-signing-key.pub
+          set -euo pipefail
+          wget -q https://substitutes.nonguix.org/signing-key.pub -O nonguix-signing-key.pub
           sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
+
       - name: Set daemon level Substitutes
         run: |
+          set -euo pipefail
           SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://substitutes.nonguix.org"
-          
           sudo sed -i "s|--substitute-urls='https://bordeaux.guix.gnu.org https://ci.guix.gnu.org'|--substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
-                
           sudo systemctl daemon-reload
-          sudo systemctl restart guix-daemon.service    
-    
+          sudo systemctl restart guix-daemon.service
+
       - name: Build ISO
         run: |
+          set -euo pipefail
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
           image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
           export RELEASE_TAG=$(date +"%Y%m%d%H%M")
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-          cp $image ./guix-installer-$RELEASE_TAG.iso
-          
+          cp "$image" "./guix-installer-$RELEASE_TAG.iso"
+
       - name: Guix cache save
         uses: actions/cache/save@v3
         if: always()
@@ -69,55 +127,66 @@ jobs:
 
       - name: Prepare Release Notes
         run: |
-          echo $'Installer image prepared with the following channel configuration:\r\n\r\n```\r\n' > release-notes.md
-          cat ./guix/channels.scm >> release-notes.md
-          echo $'\r\n```' >> release-notes.md
+          set -euo pipefail
+          {
+            echo $'Installer image prepared with the following channel configuration:\r\n\r\n```\r\n'
+            cat ./guix/channels.scm
+            echo $'\r\n```'
+          } > release-notes.md
+
+      - name: Configure AWS CLI for upload mode
+        run: |
+          set -euo pipefail
+          if [ "${UPLOAD_MODE}" = "single" ]; then
+            python3 -m pip install --upgrade --user awscli
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+            aws configure set default.s3.multipart_threshold 64GB
+            aws configure set default.s3.multipart_chunksize 64MB
+            FILE="guix-installer-${{ env.RELEASE_TAG }}.iso"
+            BYTES=$(stat -c%s "$FILE")
+            if [ "$BYTES" -ge $((5*1024*1024*1024)) ]; then
+              echo "ISO is >= 5GiB; single-part upload is not possible. Enable MPU on R2 token." >&2
+              exit 1
+            fi
+          fi
 
       - name: Upload ISO to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_EC2_METADATA_DISABLED: true
         run: |
-          BUCKET_NAME="guix-installers"
-          ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
-          R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
+          set -euo pipefail
+          retry() { n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; sleep $((n*n)); done; }
           RELEASE_TAG="${{ env.RELEASE_TAG }}"
-          
-          aws s3 cp guix-installer-${RELEASE_TAG}.iso \
-            s3://$BUCKET_NAME/guix-installer-${RELEASE_TAG}.iso \
-            --endpoint-url $R2_ENDPOINT
-          
-          aws s3 cp guix-installer-${RELEASE_TAG}.iso \
-            s3://$BUCKET_NAME/guix-installer-latest.iso \
-            --endpoint-url $R2_ENDPOINT
-          
+          FILE="guix-installer-${RELEASE_TAG}.iso"
+          E="$R2_ENDPOINT"
+          B="$BUCKET_NAME"
+          retry aws s3 cp "$FILE" "s3://$B/$FILE" --endpoint-url "$E"
+          retry aws s3 cp "$FILE" "s3://$B/guix-installer-latest.iso" --endpoint-url "$E"
           R2_PUBLIC_URL="https://guix.aamu.cloud"
-          DOWNLOAD_URL="$R2_PUBLIC_URL/guix-installer-${RELEASE_TAG}.iso"
-          DOWNLOAD_URL_LATEST="$R2_PUBLIC_URL/guix-installer-latest.iso"
-          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
-          echo "DOWNLOAD_URL_LATEST=$DOWNLOAD_URL_LATEST" >> $GITHUB_ENV
-          
-          ISO_SIZE=$(ls -lh guix-installer-${RELEASE_TAG}.iso | awk '{print $5}')
+          echo "DOWNLOAD_URL=$R2_PUBLIC_URL/$FILE" >> $GITHUB_ENV
+          echo "DOWNLOAD_URL_LATEST=$R2_PUBLIC_URL/guix-installer-latest.iso" >> $GITHUB_ENV
+          ISO_SIZE=$(ls -lh "$FILE" | awk '{print $5}')
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
-          
-          SHA256=$(sha256sum guix-installer-${RELEASE_TAG}.iso | awk '{print $1}')
-          
-          echo "" >> release-notes.md
-          echo "## ISO" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "**Direct Download:** [$DOWNLOAD_URL]($DOWNLOAD_URL)" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "**Latest Version:** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "**Size:** $ISO_SIZE" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "**SHA256 Checksum:**" >> release-notes.md
-          echo '```' >> release-notes.md
-          echo "$SHA256" >> release-notes.md
-          echo '```' >> release-notes.md
+          SHA256=$(sha256sum "$FILE" | awk '{print $1}')
+          {
+            echo ""
+            echo "## ISO"
+            echo ""
+            echo "**Direct Download:** [${{ env.DOWNLOAD_URL }}](${{ env.DOWNLOAD_URL }})"
+            echo ""
+            echo "**Latest Version:** [${{ env.DOWNLOAD_URL_LATEST }}](${{ env.DOWNLOAD_URL_LATEST }})"
+            echo ""
+            echo "**Size:** $ISO_SIZE"
+            echo ""
+            echo "**SHA256 Checksum:**"
+            echo '```'
+            echo "$SHA256"
+            echo '```'
+          } >> release-notes.md
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: Guix Installer - ${{ env.RELEASE_TAG }}
           tag_name: v${{ env.RELEASE_TAG }}
