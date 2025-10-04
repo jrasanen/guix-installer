@@ -33,7 +33,7 @@ jobs:
                 
           sudo du -sh /* 2>/dev/null | sort -hr | head -20
           echo ""
-          sudo du -sh /usr/* 2>/dev/null | sort -hr | head-20
+          sudo du -sh /usr/* 2>/dev/null | sort -hr | head -20
           echo ""
           sudo du -sh /opt/* 2>/dev/null | sort -hr | head -10
           echo ""
@@ -131,21 +131,21 @@ jobs:
           ISO_SIZE=$(ls -lh guix-installer-${RELEASE_TAG}.iso | awk '{print $5}')
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
           
-          cat >> release-notes.md << EOF
+          SHA256=$(sha256sum guix-installer-${RELEASE_TAG}.iso | awk '{print $1}')
           
-## Download ISO
-
-**Direct Download (This Version):** [$DOWNLOAD_URL]($DOWNLOAD_URL)
-
-**Latest Version (Always Current):** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)
-
-**Size:** $ISO_SIZE
-
-**SHA256 Checksum:**
-\`\`\`
-$(sha256sum guix-installer-${RELEASE_TAG}.iso | awk '{print $1}')
-\`\`\`
-EOF
+          echo "" >> release-notes.md
+          echo "## ISO" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Direct Download:** [$DOWNLOAD_URL]($DOWNLOAD_URL)" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Latest Version:** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Size:** $ISO_SIZE" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**SHA256 Checksum:**" >> release-notes.md
+          echo '```' >> release-notes.md
+          echo "$SHA256" >> release-notes.md
+          echo '```' >> release-notes.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
