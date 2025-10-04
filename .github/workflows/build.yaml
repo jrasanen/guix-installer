@@ -64,16 +64,15 @@ jobs:
           cat ./guix/channels.scm >> release-notes.md
           echo $'\r\n```' >> release-notes.md
 
-      # R2: do NOT use aws-actions/configure-aws-credentials (it calls AWS STS)
       - name: Configure R2 credentials
         run: |
           echo "AWS_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV  # required but ignored by R2
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV 
 
       - name: Upload ISO to R2
         run: |
-          BUCKET_NAME="guix-installers"
+          BUCKET_NAME="guix-builds"
           ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
           R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
           RELEASE_TAG="${{ env.RELEASE_TAG }}"
