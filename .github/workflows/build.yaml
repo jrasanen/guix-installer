@@ -144,7 +144,7 @@ jobs:
 
 **SHA256 Checksum:**
 \`\`\`
-$(sha256sum guix-installer-${{ env.RELEASE_TAG }}.iso | awk '{print $1}')
+$(sha256sum guix-installer-$RELEASE_TAG.iso | awk '{print $1}')
 \`\`\`
 EOF
 
