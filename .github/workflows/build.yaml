@@ -13,31 +13,20 @@ on:
 jobs:
   build:
     runs-on: self-hosted
+    env:
+      GUIX_BUILD_OPTIONS: "--cores=$(nproc) --max-jobs=$(nproc)"
     steps:
       - name: Git checkout
         uses: actions/checkout@v4
-        
-      - name: Guix cache restore
-        uses: actions/cache/restore@v3
-        with:
-          path: ~/.cache/guix
-          key: guix-cache-${{ github.sha }}
-          restore-keys: |
-            guix-cache-
 
-      - name: Install Guix
-        uses: PromyLOPh/guix-install-action@v1.6
+      - name: Cache Guix user caches
+        uses: actions/cache@v4
         with:
-          channels: |
-            (cons* (channel
-                     (name 'nonguix)
-                     (url "https://gitlab.com/nonguix/nonguix")
-                     (introduction
-                       (make-channel-introduction
-                         "897c1a470da759236cc11798f4e0a5f7d4d59fbc"
-                         (openpgp-fingerprint
-                           "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
-                    %default-channels)
+          path: |
+            ~/.cache/guix
+            ~/.config/guix
+            ~/.local/state/guix
+          key: guix-${{ hashFiles('guix/channels.scm', 'guix/installer.scm') }}
 
       - name: Set up Nonguix Substitutes
         run: |
@@ -48,27 +37,18 @@ jobs:
       - name: Set daemon level Substitutes
         run: |
           SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://substitutes.nonguix.org"
-          
           sudo sed -i "s|--substitute-urls='https://bordeaux.guix.gnu.org https://ci.guix.gnu.org'|--substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
-                
           sudo systemctl daemon-reload
           sudo systemctl restart guix-daemon.service    
-    
+
       - name: Build ISO
         run: |
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
-          image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
+          image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm $GUIX_BUILD_OPTIONS)
           export RELEASE_TAG=$(date +"%Y%m%d%H%M")
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
           cp $image ./guix-installer-$RELEASE_TAG.iso
           
-      - name: Guix cache save
-        uses: actions/cache/save@v3
-        if: always()
-        with:
-          path: ~/.cache/guix
-          key: guix-cache-${{ github.sha }}
-
       - name: Prepare Release Notes
         run: |
           echo $'Installer image prepared with the following channel configuration:\r\n\r\n```\r\n' > release-notes.md
@@ -79,11 +59,11 @@ jobs:
         run: |
           echo "AWS_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV   # required but ignored by R2
 
       - name: Upload ISO to R2
         run: |
-          BUCKET_NAME="guix-builds"
+          BUCKET_NAME="guix-installers"
           ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
           R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
           RELEASE_TAG="${{ env.RELEASE_TAG }}"
