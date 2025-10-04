@@ -15,124 +15,60 @@ env:
   AWS_REGION: auto
   AWS_DEFAULT_REGION: auto
   BUCKET_NAME: guix-builds
+  R2_ENDPOINT: https://53ebb30ac76e1f28a97a60cc881a7033.eu.r2.cloudflarestorage.com
   R2_PUBLIC_URL: https://guix.aamu.cloud
 
 jobs:
   preflight:
     runs-on: buildjet-4vcpu-ubuntu-2204
-    outputs:
-      upload_mode: ${{ steps.detect.outputs.upload_mode }}
-      endpoint: ${{ steps.vars.outputs.endpoint }}
-      bucket: ${{ steps.vars.outputs.bucket }}
     steps:
-      - id: vars
-        run: |
-          echo "bucket=${BUCKET_NAME}" >> $GITHUB_OUTPUT
-          echo "endpoint=https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com" >> $GITHUB_OUTPUT
-
       - name: Install AWS CLI
         run: |
           python3 -m pip install --upgrade --user awscli
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           aws --version
-
-      - id: sanity
-        name: Sanity check endpoint and creds
+      - name: Validate env present
+        run: |
+          set -euo pipefail
+          test -n "${BUCKET_NAME}"
+          test -n "${R2_ENDPOINT}"
+      - name: Require MPU permissions and S3 cp works
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          test -n "${{ steps.vars.outputs.endpoint }}"
-          test -n "${{ steps.vars.outputs.bucket }}"
-          aws sts get-caller-identity --endpoint-url ${{ steps.vars.outputs.endpoint }} >/dev/null 2>/dev/null || true
-
-      - id: detect
-        name: Detect allowed upload modes and prove writes
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          B="${{ steps.vars.outputs.bucket }}"
-          E="${{ steps.vars.outputs.endpoint }}"
+          B="$BUCKET_NAME"
+          E="$R2_ENDPOINT"
           PREFIX="_preflight/$(openssl rand -hex 6)"
           mkdir -p _preflight
           dd if=/dev/zero of=_preflight/ten_mb.bin bs=1M count=10 status=none
           echo ok > _preflight/small.txt
-
-          UPLOAD_MODE=""
-          if aws s3api create-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --endpoint-url "$E" --query UploadId --output text >/tmp/upload_id.txt 2>/dev/null; then
-            MPU_ID=$(cat /tmp/upload_id.txt)
-            aws s3api abort-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --upload-id "$MPU_ID" --endpoint-url "$E" >/dev/null 2>&1 || true
-            UPLOAD_MODE="mpu"
-          fi
-
-          if [ -z "$UPLOAD_MODE" ]; then
-            if aws s3api put-object --bucket "$B" --key "$PREFIX/single.txt" --body _preflight/small.txt --endpoint-url "$E" >/dev/null 2>&1; then
-              aws s3api delete-object --bucket "$B" --key "$PREFIX/single.txt" --endpoint-url "$E" >/dev/null 2>&1 || true
-              UPLOAD_MODE="single"
-            fi
-          fi
-
-          if [ -z "$UPLOAD_MODE" ]; then
-            echo "No permitted upload method on bucket $B" >&2
+          UPLOAD_ID=$(aws s3api create-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --endpoint-url "$E" --query UploadId --output text 2>/dev/null || true)
+          if [ -z "${UPLOAD_ID:-}" ] || [ "$UPLOAD_ID" = "None" ]; then
+            echo "Multipart upload not permitted on bucket $B. Grant CreateMultipartUpload/UploadPart/CompleteMultipartUpload/AbortMultipartUpload." >&2
             exit 1
           fi
-
-          echo "upload_mode=$UPLOAD_MODE" >> $GITHUB_OUTPUT
-
-      - name: Prove final-step commands will succeed (dry run and real tiny uploads)
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          B="${{ steps.vars.outputs.bucket }}"
-          E="${{ steps.vars.outputs.endpoint }}"
-          PREFIX="_preflight/$(openssl rand -hex 6)"
-          echo ok > _preflight/ok.txt
-
-          if [ "${{ steps.detect.outputs.upload_mode }}" = "mpu" ]; then
-            aws configure set default.s3.multipart_threshold 8MB
-            aws configure set default.s3.multipart_chunksize 8MB
-            dd if=/dev/zero of=_preflight/trigger_mpu.bin bs=1M count=10 status=none
-            aws s3 cp _preflight/trigger_mpu.bin "s3://$B/$PREFIX/trigger_mpu.bin" --endpoint-url "$E" >/dev/null
-            aws s3 rm "s3://$B/$PREFIX/trigger_mpu.bin" --endpoint-url "$E" >/dev/null
-          else
-            aws configure set default.s3.multipart_threshold 64GB
-            aws configure set default.s3.multipart_chunksize 64MB
-          fi
-
-          aws s3 cp _preflight/ok.txt "s3://$B/$PREFIX/ok.txt" --endpoint-url "$E" >/dev/null
-          aws s3 rm "s3://$B/$PREFIX/ok.txt" --endpoint-url "$E" >/dev/null
+          aws s3api abort-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --upload-id "$UPLOAD_ID" --endpoint-url "$E" >/dev/null 2>&1 || true
+          aws configure set default.s3.multipart_threshold 8MB
+          aws configure set default.s3.multipart_chunksize 8MB
+          aws s3 cp _preflight/ten_mb.bin "s3://$B/$PREFIX/ten_mb.bin" --endpoint-url "$E" >/dev/null
+          aws s3 rm "s3://$B/$PREFIX/ten_mb.bin" --endpoint-url "$E" >/dev/null
+          aws configure set default.s3.multipart_threshold 8MB
+          aws configure set default.s3.multipart_chunksize 8MB
 
   build:
     runs-on: buildjet-4vcpu-ubuntu-2204
     needs: preflight
-    env:
-      UPLOAD_MODE: ${{ needs.preflight.outputs.upload_mode }}
-      BUCKET_NAME: ${{ needs.preflight.outputs.bucket }}
-      R2_ENDPOINT: ${{ needs.preflight.outputs.endpoint }}
-      R2_PUBLIC_URL: ${{ env.R2_PUBLIC_URL }}
     steps:
-      - name: Verify preflight outputs present
-        run: |
-          set -euo pipefail
-          test -n "${UPLOAD_MODE}"
-          test -n "${BUCKET_NAME}"
-          test -n "${R2_ENDPOINT}"
-
       - name: Git checkout
         uses: actions/checkout@v4
-
       - name: Guix cache restore
         uses: actions/cache/restore@v3
         with:
           path: ~/.cache/guix
           key: guix-cache-${{ github.sha }}
           restore-keys: guix-cache-
-
       - name: Install Guix
         uses: PromyLOPh/guix-install-action@v1.6
         with:
@@ -146,13 +82,11 @@ jobs:
                          (openpgp-fingerprint
                            "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
                     %default-channels)
-
       - name: Set up Nonguix Substitutes
         run: |
           set -euo pipefail
           wget -q https://substitutes.nonguix.org/signing-key.pub -O nonguix-signing-key.pub
           sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
-
       - name: Set daemon level Substitutes
         run: |
           set -euo pipefail
@@ -160,7 +94,6 @@ jobs:
           sudo sed -i "s|--substitute-urls='https://bordeaux.guix.gnu.org https://ci.guix.gnu.org'|--substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
           sudo systemctl daemon-reload
           sudo systemctl restart guix-daemon.service
-
       - name: Build ISO
         run: |
           set -euo pipefail
@@ -169,14 +102,12 @@ jobs:
           export RELEASE_TAG=$(date +"%Y%m%d%H%M")
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
           cp "$image" "./guix-installer-$RELEASE_TAG.iso"
-
       - name: Guix cache save
         uses: actions/cache/save@v3
         if: always()
         with:
           path: ~/.cache/guix
           key: guix-cache-${{ github.sha }}
-
       - name: Prepare Release Notes
         run: |
           set -euo pipefail
@@ -185,30 +116,11 @@ jobs:
             cat ./guix/channels.scm
             echo $'\r\n```'
           } > release-notes.md
-
       - name: Install AWS CLI
         run: |
           python3 -m pip install --upgrade --user awscli
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           aws --version
-
-      - name: Configure upload mode and validate ISO size if single-part
-        run: |
-          set -euo pipefail
-          if [ "${UPLOAD_MODE}" = "single" ]; then
-            aws configure set default.s3.multipart_threshold 64GB
-            aws configure set default.s3.multipart_chunksize 64MB
-            FILE="guix-installer-${{ env.RELEASE_TAG }}.iso"
-            BYTES=$(stat -c%s "$FILE")
-            if [ "$BYTES" -ge $((5*1024*1024*1024)) ]; then
-              echo "ISO is >= 5GiB; single-part upload is not possible. Enable MPU on R2 token." >&2
-              exit 1
-            fi
-          else
-            aws configure set default.s3.multipart_threshold 8MB
-            aws configure set default.s3.multipart_chunksize 8MB
-          fi
-
       - name: Upload ISO to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -220,7 +132,8 @@ jobs:
           FILE="guix-installer-${RELEASE_TAG}.iso"
           E="$R2_ENDPOINT"
           B="$BUCKET_NAME"
-          test -n "$E"
+          aws configure set default.s3.multipart_threshold 8MB
+          aws configure set default.s3.multipart_chunksize 8MB
           retry aws s3 cp "$FILE" "s3://$B/$FILE" --endpoint-url "$E"
           retry aws s3 cp "$FILE" "s3://$B/guix-installer-latest.iso" --endpoint-url "$E"
           echo "DOWNLOAD_URL=$R2_PUBLIC_URL/$FILE" >> $GITHUB_ENV
@@ -243,7 +156,6 @@ jobs:
             echo "$SHA256"
             echo '```'
           } >> release-notes.md
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
