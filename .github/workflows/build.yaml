@@ -33,7 +33,7 @@ jobs:
                 
           sudo du -sh /* 2>/dev/null | sort -hr | head -20
           echo ""
-          sudo du -sh /usr/* 2>/dev/null | sort -hr | head -20
+          sudo du -sh /usr/* 2>/dev/null | sort -hr | head-20
           echo ""
           sudo du -sh /opt/* 2>/dev/null | sort -hr | head -10
           echo ""
@@ -112,24 +112,23 @@ jobs:
           BUCKET_NAME="guix-installers"
           ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
           R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
+          RELEASE_TAG="${{ env.RELEASE_TAG }}"
           
-          # Upload versioned ISO
-          aws s3 cp guix-installer-${{ env.RELEASE_TAG }}.iso \
-            s3://$BUCKET_NAME/guix-installer-${{ env.RELEASE_TAG }}.iso \
+          aws s3 cp guix-installer-${RELEASE_TAG}.iso \
+            s3://$BUCKET_NAME/guix-installer-${RELEASE_TAG}.iso \
             --endpoint-url $R2_ENDPOINT
           
-          # Upload as "latest" for convenience
-          aws s3 cp guix-installer-${{ env.RELEASE_TAG }}.iso \
+          aws s3 cp guix-installer-${RELEASE_TAG}.iso \
             s3://$BUCKET_NAME/guix-installer-latest.iso \
             --endpoint-url $R2_ENDPOINT
           
           R2_PUBLIC_URL="https://guix.aamu.cloud"
-          DOWNLOAD_URL="$R2_PUBLIC_URL/guix-installer-${{ env.RELEASE_TAG }}.iso"
+          DOWNLOAD_URL="$R2_PUBLIC_URL/guix-installer-${RELEASE_TAG}.iso"
           DOWNLOAD_URL_LATEST="$R2_PUBLIC_URL/guix-installer-latest.iso"
           echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
           echo "DOWNLOAD_URL_LATEST=$DOWNLOAD_URL_LATEST" >> $GITHUB_ENV
           
-          ISO_SIZE=$(ls -lh guix-installer-${{ env.RELEASE_TAG }}.iso | awk '{print $5}')
+          ISO_SIZE=$(ls -lh guix-installer-${RELEASE_TAG}.iso | awk '{print $5}')
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
           
           cat >> release-notes.md << EOF
@@ -144,7 +143,7 @@ jobs:
 
 **SHA256 Checksum:**
 \`\`\`
-$(sha256sum guix-installer-$RELEASE_TAG.iso | awk '{print $1}')
+$(sha256sum guix-installer-${RELEASE_TAG}.iso | awk '{print $1}')
 \`\`\`
 EOF
 
