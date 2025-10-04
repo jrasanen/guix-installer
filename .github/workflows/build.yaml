@@ -25,8 +25,17 @@ jobs:
           restore-keys: |
             guix-cache-
 
+      - id: guix_present
+        name: Probe Guix
+        run: |
+          if [ -x /var/guix/profiles/per-user/root/current-guix/bin/guix ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Guix
-        if: ${{ !exists('/var/guix/profiles/per-user/root/current-guix') }}
+        if: steps.guix_present.outputs.present == 'false'
         uses: PromyLOPh/guix-install-action@v1.6
         with:
           channels: |
