@@ -12,7 +12,7 @@ on:
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: buildjet-16vcpu-ubuntu-2204
     steps:
       - name: Git checkout
         uses: actions/checkout@v4
@@ -25,17 +25,7 @@ jobs:
           restore-keys: |
             guix-cache-
 
-      - id: guix_present
-        name: Probe Guix
-        run: |
-          if [ -x /var/guix/profiles/per-user/root/current-guix/bin/guix ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Install Guix
-        if: steps.guix_present.outputs.present == 'false'
         uses: PromyLOPh/guix-install-action@v1.6
         with:
           channels: |
