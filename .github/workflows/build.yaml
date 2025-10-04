@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - master
+
   schedule:
     - cron: "0 0 */7 * *"
+
   workflow_dispatch:
 
 jobs:
@@ -14,16 +16,15 @@ jobs:
     steps:
       - name: Git checkout
         uses: actions/checkout@v4
-
+        
       - name: Guix cache restore
         uses: actions/cache/restore@v3
         with:
           path: ~/.cache/guix
-          key: guix-cache-${{ hashFiles('guix/**/*.scm') }}
+          key: guix-cache-${{ github.sha }}
           restore-keys: |
             guix-cache-
-
-      - name: Install Guix (with Nonguix channel)
+      - name: Install Guix
         uses: PromyLOPh/guix-install-action@v1.6
         with:
           channels: |
@@ -36,27 +37,34 @@ jobs:
                          (openpgp-fingerprint
                            "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
                     %default-channels)
-
-      - name: Enable Nonguix substitutes
+      - name: Set up Nonguix Substitutes
         run: |
-          wget -qO- https://substitutes.nonguix.org/signing-key.pub | sudo guix archive --authorize
-          echo "https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://substitutes.nonguix.org" | sudo tee /etc/guix/substitute-urls >/dev/null
-          sudo systemctl restart guix-daemon
-
+          wget https://substitutes.nonguix.org/signing-key.pub
+          mv signing-key.pub nonguix-signing-key.pub
+          sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
+      - name: Set daemon level Substitutes
+        run: |
+          SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://substitutes.nonguix.org"
+          
+          sudo sed -i "s|--substitute-urls='https://bordeaux.guix.gnu.org https://ci.guix.gnu.org'|--substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
+                
+          sudo systemctl daemon-reload
+          sudo systemctl restart guix-daemon.service    
+    
       - name: Build ISO
         run: |
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
           image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
           export RELEASE_TAG=$(date +"%Y%m%d%H%M")
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-          cp "$image" "./guix-installer-$RELEASE_TAG.iso"
-
+          cp $image ./guix-installer-$RELEASE_TAG.iso
+          
       - name: Guix cache save
         uses: actions/cache/save@v3
         if: always()
         with:
           path: ~/.cache/guix
-          key: guix-cache-${{ hashFiles('guix/**/*.scm') }}
+          key: guix-cache-${{ github.sha }}
 
       - name: Prepare Release Notes
         run: |
@@ -64,54 +72,49 @@ jobs:
           cat ./guix/channels.scm >> release-notes.md
           echo $'\r\n```' >> release-notes.md
 
-      - name: Configure R2 credentials
-        run: |
-          echo "AWS_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV 
-
       - name: Upload ISO to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: true
         run: |
-          BUCKET_NAME="guix-builds"
+          BUCKET_NAME="guix-installers"
           ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}"
           R2_ENDPOINT="https://$ACCOUNT_ID.r2.cloudflarestorage.com"
           RELEASE_TAG="${{ env.RELEASE_TAG }}"
-
-          aws s3 cp "guix-installer-${RELEASE_TAG}.iso" \
-            "s3://$BUCKET_NAME/guix-installer-${RELEASE_TAG}.iso" \
-            --endpoint-url "$R2_ENDPOINT"
-
-          aws s3 cp "guix-installer-${RELEASE_TAG}.iso" \
-            "s3://$BUCKET_NAME/guix-installer-latest.iso" \
-            --endpoint-url "$R2_ENDPOINT"
-
+          
+          aws s3 cp guix-installer-${RELEASE_TAG}.iso \
+            s3://$BUCKET_NAME/guix-installer-${RELEASE_TAG}.iso \
+            --endpoint-url $R2_ENDPOINT
+          
+          aws s3 cp guix-installer-${RELEASE_TAG}.iso \
+            s3://$BUCKET_NAME/guix-installer-latest.iso \
+            --endpoint-url $R2_ENDPOINT
+          
           R2_PUBLIC_URL="https://guix.aamu.cloud"
           DOWNLOAD_URL="$R2_PUBLIC_URL/guix-installer-${RELEASE_TAG}.iso"
           DOWNLOAD_URL_LATEST="$R2_PUBLIC_URL/guix-installer-latest.iso"
           echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
           echo "DOWNLOAD_URL_LATEST=$DOWNLOAD_URL_LATEST" >> $GITHUB_ENV
-
-          ISO_SIZE=$(ls -lh "guix-installer-${RELEASE_TAG}.iso" | awk '{print $5}')
+          
+          ISO_SIZE=$(ls -lh guix-installer-${RELEASE_TAG}.iso | awk '{print $5}')
           echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
-
-          SHA256=$(sha256sum "guix-installer-${RELEASE_TAG}.iso" | awk '{print $1}')
-
-          {
-            echo
-            echo "## ISO"
-            echo
-            echo "**Direct Download:** [$DOWNLOAD_URL]($DOWNLOAD_URL)"
-            echo
-            echo "**Latest Version:** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)"
-            echo
-            echo "**Size:** $ISO_SIZE"
-            echo
-            echo "**SHA256 Checksum:**"
-            echo '```'
-            echo "$SHA256"
-            echo '```'
-          } >> release-notes.md
-
+          
+          SHA256=$(sha256sum guix-installer-${RELEASE_TAG}.iso | awk '{print $1}')
+          
+          echo "" >> release-notes.md
+          echo "## ISO" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Direct Download:** [$DOWNLOAD_URL]($DOWNLOAD_URL)" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Latest Version:** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**Size:** $ISO_SIZE" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "**SHA256 Checksum:**" >> release-notes.md
+          echo '```' >> release-notes.md
+          echo "$SHA256" >> release-notes.md
+          echo '```' >> release-notes.md
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
