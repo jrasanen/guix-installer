@@ -61,15 +61,7 @@
   (operating-system
     (inherit installation-os)
     (kernel linux)
-    (firmware (list
-               amdgpu-firmware
-               ;; atheros-firmware
-               ;; broadcom-sta
-               ;; i915-firmware
-               ;; iwlwifi-firmware
-               ;; mediatek-firmware
-               ;; realtek-firmware
-	       ))
+    (firmware (list linux-firmware))
 
     ;; Add the 'net.ifnames' argument to prevent network interfaces
     ;; from having really long names.  This can cause an issue with
