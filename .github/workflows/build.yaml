@@ -75,12 +75,11 @@ jobs:
           cat ./guix/channels.scm >> release-notes.md
           echo $'\r\n```' >> release-notes.md
 
-      - name: Configure R2 Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws-region: auto
+      - name: Configure R2 credentials
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
 
       - name: Upload ISO to R2
         run: |
