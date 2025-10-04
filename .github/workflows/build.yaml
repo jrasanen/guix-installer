@@ -54,6 +54,7 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache
 
           df -h
+          du -sh /* 2>/dev/null | sort -hr | head -20
 
       - name: Git checkout
         uses: actions/checkout@v4
