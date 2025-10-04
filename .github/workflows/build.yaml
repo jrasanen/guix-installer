@@ -24,7 +24,9 @@ jobs:
           key: guix-cache-${{ github.sha }}
           restore-keys: |
             guix-cache-
+
       - name: Install Guix
+        if: ${{ !exists('/var/guix/profiles/per-user/root/current-guix') }}
         uses: PromyLOPh/guix-install-action@v1.6
         with:
           channels: |
