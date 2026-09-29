@@ -1,3 +1,4 @@
 *.iso
 *.iso.zst
 ./guix/channels.scm
+/dist/

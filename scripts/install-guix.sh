@@ -28,11 +28,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Use the same official nightly binary distribution as the previous action.
-curl --fail --location --silent --show-error --retry 3 \
-  'https://ci.guix.gnu.org/search/latest/archive?query=spec:tarball+status:success+system:x86_64-linux+guix-binary.tar.xz' \
-  --output "$work_dir/guix-binary.tar.xz"
-sudo tar --extract --file "$work_dir/guix-binary.tar.xz" --directory / --no-overwrite-dir
+if [[ -x "$guix_profile/bin/guix" && -x "$guix_profile/bin/guix-daemon" && -s /var/guix/db/db.sqlite ]]; then
+  echo 'Reusing cached Guix installation.'
+else
+  if [[ -d /gnu/store || -d /var/guix/db ]]; then
+    echo 'Incomplete Guix installation in cache; reset the Namespace cache volume before retrying.' >&2
+    exit 1
+  fi
+  curl --fail --location --silent --show-error --retry 3 \
+    'https://ci.guix.gnu.org/search/latest/archive?query=spec:tarball+status:success+system:x86_64-linux+guix-binary.tar.xz' \
+    --output "$work_dir/guix-binary.tar.xz"
+  sudo tar --extract --file "$work_dir/guix-binary.tar.xz" --directory / --no-overwrite-dir
+fi
 
 # Keep builds under separate users, with the daemon retaining sandbox support.
 if ! getent group guixbuild >/dev/null; then

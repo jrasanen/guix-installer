@@ -20,10 +20,12 @@ env:
 
 jobs:
   preflight:
-    runs-on: namespace-profile-guix-installer
+    runs-on:
+      - namespace-profile-guix-installer
+      - nscloud-cache-exp-do-not-commit
     steps:
       - name: Git checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Verify FTPS publication and HTTPS downloads
         env:
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
@@ -31,122 +33,72 @@ jobs:
         run: bash scripts/ftp-upload.sh preflight
 
   build:
-    # Guix needs mount/user namespaces for its build sandboxes.
     runs-on: namespace-profile-guix-installer;container.privileged=true
     needs: preflight
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Guix cache
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: |
+            /gnu
+            /var/guix
+            ~/.cache/guix
+      - name: Install Guix
+        run: bash scripts/install-guix.sh
+      - name: Build ISO
+        run: bash scripts/build-iso.sh
+      - name: Prune Guix cache
+        env:
+          GUIX_CACHE_MAX_BYTES: ${{ vars.GUIX_CACHE_MAX_BYTES || '40000000000' }}
+        run: bash scripts/prune-guix-cache.sh
+      - name: Save installer
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: guix-installer-${{ github.run_attempt }}
+          path: dist/
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Stop Guix daemon
+        if: always()
+        run: bash scripts/stop-guix.sh
+
+  publish:
+    runs-on:
+      - namespace-profile-guix-installer
+      - nscloud-cache-exp-do-not-commit
+    needs: build
     permissions:
       contents: write
     steps:
       - name: Git checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Free up disk space
-        run: |
-          # Remove pre-installed software to make room for the ISO build.
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/share/swift
-          df -h /
-      - name: Guix cache restore
-        id: guix-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          path: ~/.cache/guix
-          # Refresh the cache on scheduled builds even when the commit is unchanged.
-          key: guix-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: guix-cache-${{ runner.os }}-${{ runner.arch }}-
-      - name: Install Guix
-        run: bash scripts/install-guix.sh
-      - name: Build ISO
-        run: |
-          set -euo pipefail
-          install -Dm644 ./guix/base-channels.scm "${XDG_CONFIG_HOME:-$HOME/.config}/guix/trusted-channels.scm"
-          guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
-          image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
-          RELEASE_TAG=$(date +"%Y%m%d%H%M")
-          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-          cp "$image" "./guix-installer-$RELEASE_TAG.iso"
-      - name: Compress ISO
-        run: zstd -19 "guix-installer-$RELEASE_TAG.iso"
-      - name: Check ISO size
-        run: |
-          ls -lh "guix-installer-$RELEASE_TAG.iso.zst"
-          stat --printf='%s bytes\n' "guix-installer-$RELEASE_TAG.iso.zst"
-      - name: Guix cache save
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: always() && steps.guix-cache.outcome == 'success'
-        with:
-          path: ~/.cache/guix
-          key: ${{ steps.guix-cache.outputs.cache-primary-key }}
-      - name: Prepare Release Notes
-        run: |
-          set -euo pipefail
-          cat > release-notes.md <<'NOTES'
-          The attached installer image is compressed with zstd. Decompress it before writing to USB:
-
-          ```sh
-          zstd -d guix-installer-*.iso.zst
-          ```
-
-          Uncompressed `.iso` downloads linked below can be written directly to USB.
-
-          Installer image prepared with the following channel configuration:
-
-          NOTES
-          {
-            echo '```scheme'
-            cat ./guix/channels.scm
-            echo '```'
-          } >> release-notes.md
-      - name: Upload ISOs over FTPS
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist/
+          merge-multiple: true
+      - name: Publish ISO over FTPS
+        id: publish
         env:
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
-        run: |
-          set -euo pipefail
-          # Publish both dated files before changing either latest download.
-          for suffix in iso iso.zst; do
-            FILE="guix-installer-${RELEASE_TAG}.$suffix"
-            bash scripts/ftp-upload.sh upload "$FILE" "$FILE"
-          done
-          for suffix in iso iso.zst; do
-            FILE="guix-installer-${RELEASE_TAG}.$suffix"
-            LATEST_FILE="guix-installer-latest.$suffix"
-            bash scripts/ftp-upload.sh upload "$FILE" "$LATEST_FILE"
-            DOWNLOAD_URL="${DOWNLOAD_BASE_URL%/}/$FILE"
-            DOWNLOAD_URL_LATEST="${DOWNLOAD_BASE_URL%/}/$LATEST_FILE"
-            ISO_BYTES=$(stat --printf='%s' "$FILE")
-            ISO_SIZE=$(numfmt --to=iec-i --suffix=B "$ISO_BYTES")
-            {
-              echo ""
-              echo "## $FILE"
-              echo ""
-              echo "**Direct Download:** [$DOWNLOAD_URL]($DOWNLOAD_URL)"
-              echo ""
-              echo "**Latest Version:** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)"
-              echo ""
-              echo "**Size:** $ISO_SIZE ($ISO_BYTES bytes)"
-              echo ""
-              echo "**SHA256 Checksum:**"
-              echo '```'
-              sha256sum "$FILE"
-              echo '```'
-            } >> release-notes.md
-          done
+        run: bash scripts/publish-iso.sh
       - name: Create Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
-          name: Guix Installer - ${{ env.RELEASE_TAG }}
-          tag_name: v${{ env.RELEASE_TAG }}
+          name: Guix Installer - ${{ steps.publish.outputs.release_tag }}
+          tag_name: v${{ steps.publish.outputs.release_tag }}
           target_commitish: ${{ github.sha }}
-          body_path: release-notes.md
+          body_path: dist/release-notes.md
           fail_on_unmatched_files: true
-          files: guix-installer-${{ env.RELEASE_TAG }}.iso.zst
-      - name: Stop Guix daemon
-        if: always()
-        run: |
-          if [ -f "$RUNNER_TEMP/guix-daemon.pid" ]; then
-            sudo kill -- "$(cat "$RUNNER_TEMP/guix-daemon.pid")" || true
-          fi
+          files: |
+            dist/SHA256SUMS
+            dist/channels.scm
+            ${{ steps.publish.outputs.iso_asset }}
