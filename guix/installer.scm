@@ -37,7 +37,7 @@
   #:use-module (nongnu packages linux)
   #:export (installation-os-nonfree))
 
-;; https://substitutes.nonguix.org/signing-key.pub
+;; https://nonguix-proxy.ditigal.xyz
 (define %signing-key
   (plain-file "nonguix.pub" "\
 (public-key
@@ -84,7 +84,7 @@
                             %default-authorized-guix-keys))
                     (substitute-urls
                      `(,@%default-substitute-urls
-                       "https://substitutes.nonguix.org"))
+                       "https://nonguix-proxy.ditigal.xyz"))
                     (channels %channels))))))
 
     ;; Add some extra packages useful for the installation process

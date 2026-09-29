@@ -63,8 +63,21 @@ jobs:
     steps:
       - name: Git checkout
         uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          # Remove pre-installed software to make room for the ISO build
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/share/swift
+          df -h /
+
       - name: Guix cache restore
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/guix
           key: guix-cache-${{ github.sha }}
@@ -82,28 +95,55 @@ jobs:
                          (openpgp-fingerprint
                            "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
                     %default-channels)
+
+      - name: Work around runner permission issue
+        run: |
+          # On Ubuntu 24.04 runners, the per-user profile directory may not
+          # exist for the 'runner' user, causing guix shell/build to fail.
+          # See: https://github.com/PromyLOPh/guix-install-action/issues/30
+          sudo mkdir -p /var/guix/profiles/per-user/runner
+          sudo chown -R runner:users /var/guix/profiles/per-user/runner
+
       - name: Set up Nonguix Substitutes
         run: |
           set -euo pipefail
-          wget -q https://substitutes.nonguix.org/signing-key.pub -O nonguix-signing-key.pub
+          # Authorize the nonguix substitute server signing key
+          cat > nonguix-signing-key.pub <<'PUBKEY'
+          (public-key (ecc (curve Ed25519) (q #C1FD53E5D4CE971933EC50C9F307AE2171A2D3B52C804642A7A35F84F3A4EA98#)))
+          PUBKEY
           sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
       - name: Set daemon level Substitutes
         run: |
           set -euo pipefail
-          SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://substitutes.nonguix.org"
-          sudo sed -i "s|--substitute-urls='https://bordeaux.guix.gnu.org https://ci.guix.gnu.org'|--substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
+          SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://nonguix-proxy.ditigal.xyz"
+
+          # The v1.6 service file doesn't include --substitute-urls, so we
+          # append it to the ExecStart line rather than replacing an existing value.
+          sudo sed -i "s|--discover=yes|--discover=yes --substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
+
           sudo systemctl daemon-reload
           sudo systemctl restart guix-daemon.service
+
       - name: Build ISO
         run: |
           set -euo pipefail
+          # Write out the channels file so it can be included
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
+
+          # Build the image
           image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
           export RELEASE_TAG=$(date +"%Y%m%d%H%M")
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
           cp "$image" "./guix-installer-$RELEASE_TAG.iso"
+
+      - name: Compress ISO
+        run: zstd -19 guix-installer-$RELEASE_TAG.iso
+
+      - name: Check ISO size
+        run: ls -lh guix-installer-*.iso.zst && stat --printf="%s" guix-installer-*.iso.zst
+
       - name: Guix cache save
-        uses: actions/cache/save@v3
+        uses: actions/cache/save@v4
         if: always()
         with:
           path: ~/.cache/guix
@@ -111,11 +151,20 @@ jobs:
       - name: Prepare Release Notes
         run: |
           set -euo pipefail
-          {
-            echo $'Installer image prepared with the following channel configuration:\r\n\r\n```\r\n'
-            cat ./guix/channels.scm
-            echo $'\r\n```'
-          } > release-notes.md
+          cat > release-notes.md <<'NOTES'
+          This installer image is compressed with zstd. Decompress it before writing to USB:
+
+          ```
+          zstd -d guix-installer-*.iso.zst
+          ```
+
+          This installer image was prepared with the following channel configuration:
+
+          NOTES
+          echo $'```\r\n' >> release-notes.md
+          cat ./guix/channels.scm >> release-notes.md
+          echo $'\r\n```' >> release-notes.md
+
       - name: Install AWS CLI
         run: |
           python3 -m pip install --upgrade --user awscli
@@ -162,5 +211,7 @@ jobs:
           name: Guix Installer - ${{ env.RELEASE_TAG }}
           tag_name: v${{ env.RELEASE_TAG }}
           body_path: release-notes.md
+          fail_on_unmatched_files: true
+          files: guix-installer-${{ env.RELEASE_TAG }}.iso.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
