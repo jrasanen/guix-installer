@@ -8,25 +8,25 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   AWS_EC2_METADATA_DISABLED: "true"
   AWS_REGION: auto
   AWS_DEFAULT_REGION: auto
+  # Avoid optional AWS checksum algorithms unsupported by R2.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
   BUCKET_NAME: guix-builds
   R2_ENDPOINT: https://53ebb30ac76e1f28a97a60cc881a7033.eu.r2.cloudflarestorage.com
   R2_PUBLIC_URL: https://guix.aamu.cloud
 
 jobs:
   preflight:
-    runs-on: buildjet-4vcpu-ubuntu-2204
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install AWS CLI
-        run: |
-          python3 -m pip install --upgrade --user awscli
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          aws --version
+      - name: Check AWS CLI
+        # AWS CLI v2 is included in the GitHub-hosted runner image.
+        run: aws --version
       - name: Validate env present
         run: |
           set -euo pipefail
@@ -43,7 +43,6 @@ jobs:
           PREFIX="_preflight/$(openssl rand -hex 6)"
           mkdir -p _preflight
           dd if=/dev/zero of=_preflight/ten_mb.bin bs=1M count=10 status=none
-          echo ok > _preflight/small.txt
           UPLOAD_ID=$(aws s3api create-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --endpoint-url "$E" --query UploadId --output text 2>/dev/null || true)
           if [ -z "${UPLOAD_ID:-}" ] || [ "$UPLOAD_ID" = "None" ]; then
             echo "Multipart upload not permitted on bucket $B. Grant CreateMultipartUpload/UploadPart/CompleteMultipartUpload/AbortMultipartUpload." >&2
@@ -54,19 +53,18 @@ jobs:
           aws configure set default.s3.multipart_chunksize 8MB
           aws s3 cp _preflight/ten_mb.bin "s3://$B/$PREFIX/ten_mb.bin" --endpoint-url "$E" >/dev/null
           aws s3 rm "s3://$B/$PREFIX/ten_mb.bin" --endpoint-url "$E" >/dev/null
-          aws configure set default.s3.multipart_threshold 8MB
-          aws configure set default.s3.multipart_chunksize 8MB
 
   build:
-    runs-on: buildjet-4vcpu-ubuntu-2204
+    runs-on: ubuntu-24.04
     needs: preflight
+    permissions:
+      contents: write
     steps:
       - name: Git checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free up disk space
         run: |
-          # Remove pre-installed software to make room for the ISO build
+          # Remove pre-installed software to make room for the ISO build.
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
@@ -75,15 +73,16 @@ jobs:
           sudo rm -rf /usr/local/lib/node_modules
           sudo rm -rf /usr/share/swift
           df -h /
-
       - name: Guix cache restore
-        uses: actions/cache/restore@v4
+        id: guix-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/guix
-          key: guix-cache-${{ github.sha }}
-          restore-keys: guix-cache-
+          # Refresh the cache on scheduled builds even when the commit is unchanged.
+          key: guix-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: guix-cache-${{ runner.os }}-${{ runner.arch }}-
       - name: Install Guix
-        uses: PromyLOPh/guix-install-action@v1.6
+        uses: PromyLOPh/guix-install-action@40615e98e5c16a451aec10fe01c214ed07cbaa77 # v1.6
         with:
           channels: |
             (cons* (channel
@@ -95,123 +94,119 @@ jobs:
                          (openpgp-fingerprint
                            "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
                     %default-channels)
-
       - name: Work around runner permission issue
         run: |
-          # On Ubuntu 24.04 runners, the per-user profile directory may not
-          # exist for the 'runner' user, causing guix shell/build to fail.
-          # See: https://github.com/PromyLOPh/guix-install-action/issues/30
-          sudo mkdir -p /var/guix/profiles/per-user/runner
-          sudo chown -R runner:users /var/guix/profiles/per-user/runner
-
+          # Guix v1.6 may leave the runner's per-user profile directory missing.
+          # https://github.com/PromyLOPh/guix-install-action/issues/30
+          profile_dir="/var/guix/profiles/per-user/$(id -un)"
+          sudo mkdir -p "$profile_dir"
+          sudo chown -R "$(id -u):$(id -g)" "$profile_dir"
       - name: Set up Nonguix Substitutes
         run: |
           set -euo pipefail
-          # Authorize the nonguix substitute server signing key
-          cat > nonguix-signing-key.pub <<'PUBKEY'
+          # Authorize Nonguix's signing key independently of the substitute proxy.
+          sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize <<'PUBKEY'
           (public-key (ecc (curve Ed25519) (q #C1FD53E5D4CE971933EC50C9F307AE2171A2D3B52C804642A7A35F84F3A4EA98#)))
           PUBKEY
-          sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
       - name: Set daemon level Substitutes
         run: |
           set -euo pipefail
           SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://nonguix-proxy.ditigal.xyz"
-
-          # The v1.6 service file doesn't include --substitute-urls, so we
-          # append it to the ExecStart line rather than replacing an existing value.
+          # The v1.6 service file has no existing --substitute-urls option.
           sudo sed -i "s|--discover=yes|--discover=yes --substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
-
           sudo systemctl daemon-reload
           sudo systemctl restart guix-daemon.service
-
       - name: Build ISO
         run: |
           set -euo pipefail
-          # Write out the channels file so it can be included
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
-
-          # Build the image
           image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
-          export RELEASE_TAG=$(date +"%Y%m%d%H%M")
-          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
+          RELEASE_TAG=$(date +"%Y%m%d%H%M")
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           cp "$image" "./guix-installer-$RELEASE_TAG.iso"
-
       - name: Compress ISO
-        run: zstd -19 guix-installer-$RELEASE_TAG.iso
-
+        run: zstd -19 "guix-installer-$RELEASE_TAG.iso"
       - name: Check ISO size
-        run: ls -lh guix-installer-*.iso.zst && stat --printf="%s" guix-installer-*.iso.zst
-
+        run: |
+          ls -lh "guix-installer-$RELEASE_TAG.iso.zst"
+          stat --printf='%s bytes\n' "guix-installer-$RELEASE_TAG.iso.zst"
       - name: Guix cache save
-        uses: actions/cache/save@v4
-        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always() && steps.guix-cache.outcome == 'success'
         with:
           path: ~/.cache/guix
-          key: guix-cache-${{ github.sha }}
+          key: ${{ steps.guix-cache.outputs.cache-primary-key }}
       - name: Prepare Release Notes
         run: |
           set -euo pipefail
           cat > release-notes.md <<'NOTES'
-          This installer image is compressed with zstd. Decompress it before writing to USB:
+          The attached installer image is compressed with zstd. Decompress it before writing to USB:
 
-          ```
+          ```sh
           zstd -d guix-installer-*.iso.zst
           ```
 
-          This installer image was prepared with the following channel configuration:
+          Uncompressed `.iso` downloads from R2 can be written directly to USB.
+
+          Installer image prepared with the following channel configuration:
 
           NOTES
-          echo $'```\r\n' >> release-notes.md
-          cat ./guix/channels.scm >> release-notes.md
-          echo $'\r\n```' >> release-notes.md
-
-      - name: Install AWS CLI
-        run: |
-          python3 -m pip install --upgrade --user awscli
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          aws --version
-      - name: Upload ISO to R2
+          {
+            echo '```scheme'
+            cat ./guix/channels.scm
+            echo '```'
+          } >> release-notes.md
+      - name: Check AWS CLI
+        run: aws --version
+      - name: Upload ISOs to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          retry() { n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && return 1; sleep $((n*n)); done; }
-          RELEASE_TAG="${{ env.RELEASE_TAG }}"
-          FILE="guix-installer-${RELEASE_TAG}.iso"
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ "$n" -ge 5 ]; then return 1; fi
+              sleep $((n*n))
+            done
+          }
           E="$R2_ENDPOINT"
           B="$BUCKET_NAME"
           aws configure set default.s3.multipart_threshold 8MB
           aws configure set default.s3.multipart_chunksize 8MB
-          retry aws s3 cp "$FILE" "s3://$B/$FILE" --endpoint-url "$E"
-          retry aws s3 cp "$FILE" "s3://$B/guix-installer-latest.iso" --endpoint-url "$E"
-          echo "DOWNLOAD_URL=$R2_PUBLIC_URL/$FILE" >> $GITHUB_ENV
-          echo "DOWNLOAD_URL_LATEST=$R2_PUBLIC_URL/guix-installer-latest.iso" >> $GITHUB_ENV
-          ISO_SIZE=$(ls -lh "$FILE" | awk '{print $5}')
-          echo "ISO_SIZE=$ISO_SIZE" >> $GITHUB_ENV
-          SHA256=$(sha256sum "$FILE" | awk '{print $1}')
-          {
-            echo ""
-            echo "## ISO"
-            echo ""
-            echo "**Direct Download:** [${{ env.DOWNLOAD_URL }}](${{ env.DOWNLOAD_URL }})"
-            echo ""
-            echo "**Latest Version:** [${{ env.DOWNLOAD_URL_LATEST }}](${{ env.DOWNLOAD_URL_LATEST }})"
-            echo ""
-            echo "**Size:** $ISO_SIZE"
-            echo ""
-            echo "**SHA256 Checksum:**"
-            echo '```'
-            echo "$SHA256"
-            echo '```'
-          } >> release-notes.md
+          for suffix in iso iso.zst; do
+            FILE="guix-installer-${RELEASE_TAG}.$suffix"
+            LATEST_FILE="guix-installer-latest.$suffix"
+            retry aws s3 cp "$FILE" "s3://$B/$FILE" --endpoint-url "$E"
+            retry aws s3 cp "$FILE" "s3://$B/$LATEST_FILE" --endpoint-url "$E"
+            DOWNLOAD_URL="$R2_PUBLIC_URL/$FILE"
+            DOWNLOAD_URL_LATEST="$R2_PUBLIC_URL/$LATEST_FILE"
+            ISO_BYTES=$(stat --printf='%s' "$FILE")
+            ISO_SIZE=$(numfmt --to=iec-i --suffix=B "$ISO_BYTES")
+            {
+              echo ""
+              echo "## $FILE"
+              echo ""
+              echo "**Direct Download:** [$DOWNLOAD_URL]($DOWNLOAD_URL)"
+              echo ""
+              echo "**Latest Version:** [$DOWNLOAD_URL_LATEST]($DOWNLOAD_URL_LATEST)"
+              echo ""
+              echo "**Size:** $ISO_SIZE ($ISO_BYTES bytes)"
+              echo ""
+              echo "**SHA256 Checksum:**"
+              echo '```'
+              sha256sum "$FILE"
+              echo '```'
+            } >> release-notes.md
+          done
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: Guix Installer - ${{ env.RELEASE_TAG }}
           tag_name: v${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           body_path: release-notes.md
           fail_on_unmatched_files: true
           files: guix-installer-${{ env.RELEASE_TAG }}.iso.zst
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

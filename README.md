@@ -23,12 +23,24 @@ we're making improvements to the configuration.**
 ## Instructions
 
 1. Download a recently built `.iso` from this repo's
-   [release page](https://github.com/SystemCrafters/guix-installer/releases)
-2. Flash the `.iso` file into a USB stick with at least `3Gb`.
+   [release page](https://github.com/jrasanen/guix-installer/releases).
+   Releases include a zstd-compressed `.iso.zst` attachment, plus links to
+   uncompressed and compressed downloads hosted on R2. The latest R2 downloads
+   are available as [an ISO](https://guix.aamu.cloud/guix-installer-latest.iso)
+   or [a compressed ISO](https://guix.aamu.cloud/guix-installer-latest.iso.zst).
+2. If you downloaded a `.iso.zst` file, decompress it with a zstd-compatible
+   archive tool, or run:
+
+   ```sh
+   zstd -d guix-installer-*.iso.zst
+   ```
+
+3. Flash the resulting `.iso` file to a USB stick large enough for the
+   uncompressed image. Each release lists the file sizes and SHA256 checksums.
 
 ### Flashing the ISO
 
-As stated in _step #2_ at [Instructions](#instructions), you will need to flash
+As stated in _step #3_ at [Instructions](#instructions), you will need to flash
 the `.iso` file into a USB stick.
 
 **[*]nix**:
