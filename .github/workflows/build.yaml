@@ -62,6 +62,7 @@ jobs:
       - name: Build ISO
         run: |
           set -euo pipefail
+          install -Dm644 ./guix/base-channels.scm "${XDG_CONFIG_HOME:-$HOME/.config}/guix/trusted-channels.scm"
           guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
           image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
           RELEASE_TAG=$(date +"%Y%m%d%H%M")
