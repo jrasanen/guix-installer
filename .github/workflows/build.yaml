@@ -10,52 +10,28 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: guix-installer-publish
+  cancel-in-progress: false
+
 env:
-  AWS_EC2_METADATA_DISABLED: "true"
-  AWS_REGION: auto
-  AWS_DEFAULT_REGION: auto
-  # Avoid optional AWS checksum algorithms unsupported by R2.
-  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-  BUCKET_NAME: guix-builds
-  R2_ENDPOINT: https://53ebb30ac76e1f28a97a60cc881a7033.eu.r2.cloudflarestorage.com
-  R2_PUBLIC_URL: https://guix.aamu.cloud
+  FTP_UPLOAD_URL: ${{ vars.FTP_UPLOAD_URL }}
+  DOWNLOAD_BASE_URL: ${{ vars.DOWNLOAD_BASE_URL }}
 
 jobs:
   preflight:
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-guix-installer
     steps:
-      - name: Check AWS CLI
-        # AWS CLI v2 is included in the GitHub-hosted runner image.
-        run: aws --version
-      - name: Validate env present
-        run: |
-          set -euo pipefail
-          test -n "${BUCKET_NAME}"
-          test -n "${R2_ENDPOINT}"
-      - name: Require MPU permissions and S3 cp works
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify FTPS publication and HTTPS downloads
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          B="$BUCKET_NAME"
-          E="$R2_ENDPOINT"
-          PREFIX="_preflight/$(openssl rand -hex 6)"
-          mkdir -p _preflight
-          dd if=/dev/zero of=_preflight/ten_mb.bin bs=1M count=10 status=none
-          UPLOAD_ID=$(aws s3api create-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --endpoint-url "$E" --query UploadId --output text 2>/dev/null || true)
-          if [ -z "${UPLOAD_ID:-}" ] || [ "$UPLOAD_ID" = "None" ]; then
-            echo "Multipart upload not permitted on bucket $B. Grant CreateMultipartUpload/UploadPart/CompleteMultipartUpload/AbortMultipartUpload." >&2
-            exit 1
-          fi
-          aws s3api abort-multipart-upload --bucket "$B" --key "$PREFIX/mpu.bin" --upload-id "$UPLOAD_ID" --endpoint-url "$E" >/dev/null 2>&1 || true
-          aws configure set default.s3.multipart_threshold 8MB
-          aws configure set default.s3.multipart_chunksize 8MB
-          aws s3 cp _preflight/ten_mb.bin "s3://$B/$PREFIX/ten_mb.bin" --endpoint-url "$E" >/dev/null
-          aws s3 rm "s3://$B/$PREFIX/ten_mb.bin" --endpoint-url "$E" >/dev/null
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: bash scripts/ftp-upload.sh preflight
 
   build:
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-guix-installer
     needs: preflight
     permissions:
       contents: write
@@ -146,7 +122,7 @@ jobs:
           zstd -d guix-installer-*.iso.zst
           ```
 
-          Uncompressed `.iso` downloads from R2 can be written directly to USB.
+          Uncompressed `.iso` downloads linked below can be written directly to USB.
 
           Installer image prepared with the following channel configuration:
 
@@ -156,33 +132,23 @@ jobs:
             cat ./guix/channels.scm
             echo '```'
           } >> release-notes.md
-      - name: Check AWS CLI
-        run: aws --version
-      - name: Upload ISOs to R2
+      - name: Upload ISOs over FTPS
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
         run: |
           set -euo pipefail
-          retry() {
-            local n=0
-            until "$@"; do
-              n=$((n+1))
-              if [ "$n" -ge 5 ]; then return 1; fi
-              sleep $((n*n))
-            done
-          }
-          E="$R2_ENDPOINT"
-          B="$BUCKET_NAME"
-          aws configure set default.s3.multipart_threshold 8MB
-          aws configure set default.s3.multipart_chunksize 8MB
+          # Publish both dated files before changing either latest download.
+          for suffix in iso iso.zst; do
+            FILE="guix-installer-${RELEASE_TAG}.$suffix"
+            bash scripts/ftp-upload.sh upload "$FILE" "$FILE"
+          done
           for suffix in iso iso.zst; do
             FILE="guix-installer-${RELEASE_TAG}.$suffix"
             LATEST_FILE="guix-installer-latest.$suffix"
-            retry aws s3 cp "$FILE" "s3://$B/$FILE" --endpoint-url "$E"
-            retry aws s3 cp "$FILE" "s3://$B/$LATEST_FILE" --endpoint-url "$E"
-            DOWNLOAD_URL="$R2_PUBLIC_URL/$FILE"
-            DOWNLOAD_URL_LATEST="$R2_PUBLIC_URL/$LATEST_FILE"
+            bash scripts/ftp-upload.sh upload "$FILE" "$LATEST_FILE"
+            DOWNLOAD_URL="${DOWNLOAD_BASE_URL%/}/$FILE"
+            DOWNLOAD_URL_LATEST="${DOWNLOAD_BASE_URL%/}/$LATEST_FILE"
             ISO_BYTES=$(stat --printf='%s' "$FILE")
             ISO_SIZE=$(numfmt --to=iec-i --suffix=B "$ISO_BYTES")
             {

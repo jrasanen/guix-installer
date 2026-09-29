@@ -25,9 +25,9 @@ we're making improvements to the configuration.**
 1. Download a recently built `.iso` from this repo's
    [release page](https://github.com/jrasanen/guix-installer/releases).
    Releases include a zstd-compressed `.iso.zst` attachment, plus links to
-   uncompressed and compressed downloads hosted on R2. The latest R2 downloads
-   are available as [an ISO](https://guix.aamu.cloud/guix-installer-latest.iso)
-   or [a compressed ISO](https://guix.aamu.cloud/guix-installer-latest.iso.zst).
+   uncompressed and compressed HTTPS downloads. The
+   [latest release](https://github.com/jrasanen/guix-installer/releases/latest)
+   contains the current direct download and `latest` links for both formats.
 2. If you downloaded a `.iso.zst` file, decompress it with a zstd-compatible
    archive tool, or run:
 
