@@ -31,7 +31,8 @@ jobs:
         run: bash scripts/ftp-upload.sh preflight
 
   build:
-    runs-on: namespace-profile-guix-installer
+    # Guix needs mount/user namespaces for its build sandboxes.
+    runs-on: namespace-profile-guix-installer;container.privileged=true
     needs: preflight
     permissions:
       contents: write
@@ -58,40 +59,7 @@ jobs:
           key: guix-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: guix-cache-${{ runner.os }}-${{ runner.arch }}-
       - name: Install Guix
-        uses: PromyLOPh/guix-install-action@40615e98e5c16a451aec10fe01c214ed07cbaa77 # v1.6
-        with:
-          channels: |
-            (cons* (channel
-                     (name 'nonguix)
-                     (url "https://gitlab.com/nonguix/nonguix")
-                     (introduction
-                       (make-channel-introduction
-                         "897c1a470da759236cc11798f4e0a5f7d4d59fbc"
-                         (openpgp-fingerprint
-                           "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
-                    %default-channels)
-      - name: Work around runner permission issue
-        run: |
-          # Guix v1.6 may leave the runner's per-user profile directory missing.
-          # https://github.com/PromyLOPh/guix-install-action/issues/30
-          profile_dir="/var/guix/profiles/per-user/$(id -un)"
-          sudo mkdir -p "$profile_dir"
-          sudo chown -R "$(id -u):$(id -g)" "$profile_dir"
-      - name: Set up Nonguix Substitutes
-        run: |
-          set -euo pipefail
-          # Authorize Nonguix's signing key independently of the substitute proxy.
-          sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize <<'PUBKEY'
-          (public-key (ecc (curve Ed25519) (q #C1FD53E5D4CE971933EC50C9F307AE2171A2D3B52C804642A7A35F84F3A4EA98#)))
-          PUBKEY
-      - name: Set daemon level Substitutes
-        run: |
-          set -euo pipefail
-          SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://nonguix-proxy.ditigal.xyz"
-          # The v1.6 service file has no existing --substitute-urls option.
-          sudo sed -i "s|--discover=yes|--discover=yes --substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
-          sudo systemctl daemon-reload
-          sudo systemctl restart guix-daemon.service
+        run: bash scripts/install-guix.sh
       - name: Build ISO
         run: |
           set -euo pipefail
@@ -176,3 +144,9 @@ jobs:
           body_path: release-notes.md
           fail_on_unmatched_files: true
           files: guix-installer-${{ env.RELEASE_TAG }}.iso.zst
+      - name: Stop Guix daemon
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/guix-daemon.pid" ]; then
+            sudo kill -- "$(cat "$RUNNER_TEMP/guix-daemon.pid")" || true
+          fi
