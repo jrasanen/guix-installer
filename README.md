@@ -22,9 +22,10 @@ we're making improvements to the configuration.**
 
 ## Instructions
 
-1. Download a recently built `.iso` from this repo's
-   [release page](https://github.com/SystemCrafters/guix-installer/releases)
-2. Flash the `.iso` file into a USB stick with at least `3Gb`.
+1. Download the `.iso` linked from the
+   [latest release](https://github.com/jrasanen/guix-installer/releases/latest).
+   The release includes the image size and SHA256 checksums.
+2. Flash the image to a USB stick.
 
 ### Flashing the ISO
 

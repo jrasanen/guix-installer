@@ -2,134 +2,103 @@ name: Build Guix Installer
 
 on:
   push:
-    branches:
-      - master
-
+    branches: [ master ]
   schedule:
-    # build every week
     - cron: "0 0 */7 * *"
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: guix-installer-publish
+  cancel-in-progress: false
+
+env:
+  FTP_UPLOAD_URL: ${{ vars.FTP_UPLOAD_URL }}
+  DOWNLOAD_BASE_URL: ${{ vars.DOWNLOAD_BASE_URL }}
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  preflight:
+    runs-on:
+      - namespace-profile-guix-installer
+      - nscloud-cache-exp-do-not-commit
     steps:
       - name: Git checkout
-        uses: actions/checkout@v4
-
-      - name: Free up disk space
-        run: |
-          # Remove pre-installed software to make room for the ISO build
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/share/swift
-          df -h /
-
-      - name: Guix cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/guix
-          # use a key that (almost) never matches
-          key: guix-cache-${{ github.sha }}
-          restore-keys: |
-            guix-cache-
-
-      - name: Install Guix
-        uses: PromyLOPh/guix-install-action@v1.6
-        with:
-          channels: |
-            (cons* (channel
-                     (name 'nonguix)
-                     (url "https://gitlab.com/nonguix/nonguix")
-                     (introduction
-                       (make-channel-introduction
-                         "897c1a470da759236cc11798f4e0a5f7d4d59fbc"
-                         (openpgp-fingerprint
-                           "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
-                    %default-channels)
-
-      - name: Work around runner permission issue
-        run: |
-          # On Ubuntu 24.04 runners, the per-user profile directory may not
-          # exist for the 'runner' user, causing guix shell/build to fail.
-          # See: https://github.com/PromyLOPh/guix-install-action/issues/30
-          sudo mkdir -p /var/guix/profiles/per-user/runner
-          sudo chown -R runner:users /var/guix/profiles/per-user/runner
-
-      - name: Set up Nonguix Substitutes
-        run: |
-          # Authorize the nonguix substitute server signing key
-          cat > nonguix-signing-key.pub <<'PUBKEY'
-          (public-key (ecc (curve Ed25519) (q #C1FD53E5D4CE971933EC50C9F307AE2171A2D3B52C804642A7A35F84F3A4EA98#)))
-          PUBKEY
-          sudo /var/guix/profiles/per-user/root/current-guix/bin/guix archive --authorize < nonguix-signing-key.pub
-
-      - name: Set daemon level Substitutes
-        run: |
-          SUBSTITUTE_URLS="https://ci.guix.gnu.org https://bordeaux.guix.gnu.org https://nonguix-proxy.ditigal.xyz"
-
-          # The v1.6 service file doesn't include --substitute-urls, so we
-          # append it to the ExecStart line rather than replacing an existing value.
-          sudo sed -i "s|--discover=yes|--discover=yes --substitute-urls='$SUBSTITUTE_URLS'|g" /etc/systemd/system/guix-daemon.service
-
-          sudo systemctl daemon-reload
-          sudo systemctl restart guix-daemon.service
-
-      - name: Build ISO
-        run: |
-          # Write out the channels file so it can be included
-          guix time-machine -C ./guix/base-channels.scm -- describe -f channels > ./guix/channels.scm
-
-          # Build the image
-          image=$(guix time-machine -C ./guix/channels.scm -- system image -t iso9660 ./guix/installer.scm)
-
-          # Copy the image to the local folder with a better name
-          export RELEASE_TAG=$(date +"%Y%m%d%H%M")
-          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-          cp $image ./guix-installer-$RELEASE_TAG.iso
-
-      - name: Compress ISO
-        run: zstd -19 guix-installer-$RELEASE_TAG.iso
-
-      - name: Check ISO size
-        run: ls -lh guix-installer-*.iso.zst && stat --printf="%s" guix-installer-*.iso.zst
-
-      - uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: ~/.cache/guix
-          key: guix-cache-${{ github.sha }}
-
-      - name: Prepare Release Notes
-        run: |
-          cat > release-notes.md <<'NOTES'
-          This installer image is compressed with zstd. Decompress it before writing to USB:
-
-          ```
-          zstd -d guix-installer-*.iso.zst
-          ```
-
-          This installer image was prepared with the following channel configuration:
-
-          NOTES
-          echo $'```\r\n' >> release-notes.md
-          cat ./guix/channels.scm >> release-notes.md
-          echo $'\r\n```' >> release-notes.md
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Guix Installer - ${{ env.RELEASE_TAG }}
-          tag_name: v${{ env.RELEASE_TAG }}
-          body_path: release-notes.md
-          fail_on_unmatched_files: true
-          files: guix-installer-${{ env.RELEASE_TAG }}.iso.zst
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check FTPS uploads and HTTPS downloads
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: SystemCrafters/guix-installer
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: python3 scripts/ftp-upload.py preflight
+
+  build:
+    runs-on: namespace-profile-guix-installer;container.privileged=true
+    needs: preflight
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Guix cache
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: |
+            /gnu
+            /var/guix
+            ~/.cache/guix
+      - name: Install Guix
+        run: bash scripts/install-guix.sh
+      - name: Build ISO
+        run: bash scripts/build-iso.sh
+      - name: Prune Guix cache
+        env:
+          GUIX_CACHE_MAX_BYTES: ${{ vars.GUIX_CACHE_MAX_BYTES }}
+        run: bash scripts/prune-guix-cache.sh
+      - name: Save installer
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: guix-installer-${{ github.run_attempt }}
+          path: dist/
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Stop Guix daemon
+        if: always()
+        run: bash scripts/stop-guix.sh
+
+  publish:
+    runs-on:
+      - namespace-profile-guix-installer
+      - nscloud-cache-exp-do-not-commit
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: dist/
+          merge-multiple: true
+      - name: Publish ISO over FTPS
+        id: publish
+        env:
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: bash scripts/publish-iso.sh
+      - name: Create Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        with:
+          name: Guix Installer - ${{ steps.publish.outputs.release_tag }}
+          tag_name: v${{ steps.publish.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/SHA256SUMS
+            dist/channels.scm
+            ${{ steps.publish.outputs.iso_asset }}
