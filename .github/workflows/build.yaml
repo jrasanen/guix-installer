@@ -91,7 +91,7 @@ jobs:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
         run: bash scripts/publish-iso.sh
       - name: Create Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3
         with:
           name: Guix Installer - ${{ steps.publish.outputs.release_tag }}
           tag_name: v${{ steps.publish.outputs.release_tag }}
